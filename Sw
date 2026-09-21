@@ -1,0 +1,66 @@
+/* 全素成分檢查 — 離線快取
+   改版時把 VERSION 加一，使用者下次連網開啟會自動更新。
+   辨識引擎放在另一個快取（CDN），改版時不會被清掉，免得每次更新都要重新下載幾 MB。 */
+const VERSION = "v3";
+const CACHE = "vegan-check-" + VERSION;
+const CDN_CACHE = "vegan-cdn-v1";
+const SHELL = ["./", "./index.html", "./apple-touch-icon.png"];
+
+self.addEventListener("install", e => {
+  e.waitUntil(
+    caches.open(CACHE)
+      // 逐一快取：少了某個檔案也不會整批失敗
+      .then(c => Promise.all(SHELL.map(u => c.add(u).catch(() => {}))))
+      .then(() => self.skipWaiting())
+  );
+});
+
+self.addEventListener("activate", e => {
+  e.waitUntil(
+    caches.keys()
+      .then(ks => Promise.all(ks.filter(k => k !== CACHE && k !== CDN_CACHE).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
+});
+
+self.addEventListener("fetch", e => {
+  const req = e.request;
+  if (req.method !== "GET") return;
+  const url = new URL(req.url);
+
+  // 辨識引擎與語言檔（jsDelivr，版本號固定）：有快取就用快取，沒有才下載
+  if (url.hostname === "cdn.jsdelivr.net") {
+    e.respondWith(
+      caches.open(CDN_CACHE).then(async c => {
+        const hit = await c.match(req);
+        if (hit) return hit;
+        const r = await fetch(req);
+        if (r && (r.ok || r.type === "opaque")) c.put(req, r.clone());
+        return r;
+      })
+    );
+    return;
+  }
+
+  if (url.origin !== location.origin) return;
+
+  // 導覽請求（含 ?q=… ）一律回同一份頁面，離線也開得起來
+  if (req.mode === "navigate") {
+    e.respondWith(
+      fetch(req)
+        .then(r => { caches.open(CACHE).then(c => c.put("./index.html", r.clone())); return r; })
+        .catch(() => caches.match("./index.html").then(r => r || caches.match("./")))
+    );
+    return;
+  }
+
+  // 其餘資源：先給快取，同時在背景更新
+  e.respondWith(
+    caches.match(req).then(hit => {
+      const net = fetch(req)
+        .then(r => { if (r && r.ok) caches.open(CACHE).then(c => c.put(req, r.clone())); return r; })
+        .catch(() => hit);
+      return hit || net;
+    })
+  );
+});
